@@ -4,55 +4,70 @@ const cors = require('cors');
 const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
-app.use(cors()); // Allow requests from your game
+app.use(cors());
 app.use(express.json());
 
 // --- CONFIG ---
-// You will set these in Vercel Settings later
-const MONGO_URI = process.env.MONGODB_URI; 
+const MONGO_URI = process.env.MONGODB_URI;
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-
 const client = new OAuth2Client(CLIENT_ID);
 
-// --- DATABASE SCHEMA ---
+// --- USER SCHEMA ---
 const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
     name: String,
     picture: String,
     highScore: { type: Number, default: 0 }
 });
-const User = mongoose.model('User', userSchema);
 
-// Connect to DB
-if (MONGO_URI) {
-    mongoose.connect(MONGO_URI)
-        .then(() => console.log("Connected to MongoDB"))
-        .catch(err => console.error("Mongo Error:", err));
+// PREVENT OVERWRITE ERROR: Check if model exists before defining
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+
+// --- ROBUST DB CONNECTION (The Fix) ---
+let isConnected = false; // Track connection status
+
+async function connectToDatabase() {
+    if (isConnected) {
+        return; // Already connected, skip logic
+    }
+
+    if (!MONGO_URI) {
+        throw new Error("MONGODB_URI is missing in Environment Variables");
+    }
+
+    try {
+        // Prepare connection options
+        const db = await mongoose.connect(MONGO_URI, {
+            serverSelectionTimeoutMS: 5000, // Fail fast if IP is blocked
+            bufferCommands: false // Disable buffering to see real errors immediately
+        });
+
+        isConnected = db.connections[0].readyState;
+        console.log("--> MongoDB Connected Successfully");
+    } catch (error) {
+        console.error("--> MongoDB Connection Failed:", error);
+        throw error; // Stop execution if DB fails
+    }
 }
 
 // --- ENDPOINTS ---
 
-// 1. Sync Score (Login & Update)
 app.post('/api/sync-score', async (req, res) => {
-    const { token, currentScore } = req.body;
-
     try {
-        // Verify Google Token (Security)
+        await connectToDatabase(); // <--- CALL THIS inside every route
+
+        const { token, currentScore } = req.body;
         const ticket = await client.verifyIdToken({
             idToken: token,
             audience: CLIENT_ID,
         });
-        const payload = ticket.getPayload();
-        const { sub: googleId, name, picture } = payload;
+        const { sub: googleId, name, picture } = ticket.getPayload();
 
-        // Find User
         let user = await User.findOne({ googleId });
 
         if (!user) {
-            // New User
             user = new User({ googleId, name, picture, highScore: currentScore || 0 });
         } else {
-            // Update User info and check High Score
             user.name = name;
             user.picture = picture;
             if (currentScore > user.highScore) {
@@ -60,29 +75,30 @@ app.post('/api/sync-score', async (req, res) => {
             }
         }
         await user.save();
-
         res.json({ success: true, highScore: user.highScore, name: user.name });
 
     } catch (error) {
-        console.error(error);
-        res.status(401).json({ error: "Invalid Token or Server Error" });
+        console.error("Sync Error:", error);
+        res.status(500).json({ error: error.message });
     }
 });
 
-// 2. Get Leaderboard (Top 10)
 app.get('/api/leaderboard', async (req, res) => {
     try {
-        const topPlayers = await User.find({}, 'name picture highScore') // Select specific fields
-            .sort({ highScore: -1 }) // Descending order
-            .limit(10);
+        await connectToDatabase(); // <--- CALL THIS inside every route
+
+        const topPlayers = await User.find({}, 'name picture highScore')
+            .sort({ highScore: -1 })
+            .limit(10)
+            .lean(); // .lean() makes it faster
+            
         res.json(topPlayers);
     } catch (error) {
-        res.status(500).json({ error: "Fetch failed" });
+        console.error("Leaderboard Error:", error);
+        res.status(500).json({ error: error.message });
     }
 });
 
-// Default Route
-app.get('/', (req, res) => res.send("Minesweeper API is running!"));
+app.get('/', (req, res) => res.send("Minesweeper API Online"));
 
-// Export for Vercel
 module.exports = app;
