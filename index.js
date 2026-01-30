@@ -50,9 +50,38 @@ async function connectToDatabase() {
     }
 }
 
+// --- MIDDLEWARE ---
+
+// Domain security middleware for kireitours.asia
+function checkDomain(req, res, next) {
+    const origin = req.get('origin');
+    const referer = req.get('referer');
+    
+    const allowedDomain = 'kireitours.asia';
+    
+    // Check origin header first (preferred for CORS)
+    if (origin) {
+        const originDomain = origin.replace(/^https?:\/\//, '').replace(/:\d+$/, '');
+        if (originDomain === allowedDomain || originDomain.endsWith('.' + allowedDomain)) {
+            return next();
+        }
+    }
+    
+    // Fallback to referer header
+    if (referer) {
+        const refererDomain = referer.replace(/^https?:\/\//, '').split('/')[0].replace(/:\d+$/, '');
+        if (refererDomain === allowedDomain || refererDomain.endsWith('.' + allowedDomain)) {
+            return next();
+        }
+    }
+    
+    // Reject if neither header matches
+    return res.status(403).json({ error: 'Access denied: Invalid domain' });
+}
+
 // --- ENDPOINTS ---
 
-app.post('/api/sync-score', async (req, res) => {
+app.post('/api/sync-score', checkDomain, async (req, res) => {
     try {
         await connectToDatabase(); // <--- CALL THIS inside every route
 
