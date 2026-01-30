@@ -4,7 +4,22 @@ const cors = require('cors');
 const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps, curl, Postman)
+        // or from kireitours.asia and its subdomains
+        if (!origin) return callback(null, true);
+        
+        const allowedDomain = 'kireitours.asia';
+        const originDomain = origin.replace(/^https?:\/\//, '').split('/')[0].replace(/:\d+$/, '');
+        
+        if (originDomain === allowedDomain || originDomain.endsWith('.' + allowedDomain)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    }
+}));
 app.use(express.json());
 
 // --- CONFIG ---
@@ -50,9 +65,43 @@ async function connectToDatabase() {
     }
 }
 
+// --- MIDDLEWARE ---
+
+// Domain security middleware for kireitours.asia
+// NOTE: This provides basic protection against casual misuse from legitimate but incorrect sources.
+// Origin and Referer headers can be spoofed by attackers. The primary security comes from
+// the Google OAuth token validation in the route handler. This middleware serves as an
+// additional layer to prevent accidental misuse.
+function checkDomain(req, res, next) {
+    const origin = req.get('origin');
+    const referer = req.get('referer');
+    
+    const allowedDomain = 'kireitours.asia';
+    
+    // Check origin header first (preferred for CORS)
+    if (origin) {
+        const originDomain = origin.replace(/^https?:\/\//, '').split('/')[0].replace(/:\d+$/, '');
+        if (originDomain === allowedDomain || originDomain.endsWith('.' + allowedDomain)) {
+            return next();
+        }
+    }
+    
+    // Fallback to referer header
+    if (referer) {
+        const refererDomain = referer.replace(/^https?:\/\//, '').split('/')[0].replace(/:\d+$/, '');
+        if (refererDomain === allowedDomain || refererDomain.endsWith('.' + allowedDomain)) {
+            return next();
+        }
+    }
+    
+    // Reject if neither header matches
+    // Note: Some legitimate requests (privacy browsers, mobile apps) may not send these headers
+    return res.status(403).json({ error: 'Access denied: Invalid domain' });
+}
+
 // --- ENDPOINTS ---
 
-app.post('/api/sync-score', async (req, res) => {
+app.post('/api/sync-score', checkDomain, async (req, res) => {
     try {
         await connectToDatabase(); // <--- CALL THIS inside every route
 
